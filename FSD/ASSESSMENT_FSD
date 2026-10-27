@@ -1,1 +1,255 @@
+const express = require('express');
+const mongoose = require('mongoose');
 
+const app = express();
+app.use(express.json());
+
+// ==========================================
+// 1. MONGOOSE SCHEMA DEFINITION
+// ==========================================
+const registrationSchema = new mongoose.Schema({
+  studentName: {
+    type: String,
+    required: [true, 'Student name is required'],
+    trim: true,
+    minlength: [3, 'Student name must be at least 3 characters'],
+    maxlength: [50, 'Student name cannot exceed 50 characters']
+  },
+  collegeEmail: {
+    type: String,
+    required: [true, 'College email is required'],
+    unique: true,
+    trim: true,
+    lowercase: true,
+    match: [/(\.edu|\.ac\.in)$/, 'Must be a valid college email ending in .edu or .ac.in'][cite: 2]
+  },
+  rollNumber: {
+    type: String,
+    required: [true, 'Roll number is required'],
+    uppercase: true,
+    trim: true,
+    match: [/^[A-Z0-9]{8,10}$/, 'Roll number must be alphanumeric and exactly 8 to 10 characters'][cite: 2]
+  },
+  eventType: {
+    type: String,
+    required: [true, 'Event type is required'],
+    enum: {
+      values: ['CODING_HACKATHON', 'AI WORKSHOP', 'AI_WORKSHOP', 'ROBOTICS', 'GAMING'],
+      message: 'Invalid event type'
+    }[cite: 2]
+  },
+  teamSize: {
+    type: Number,
+    required: [true, 'Team size is required'],
+    min: [1, 'Team size must be at least 1'],
+    max: [4, 'Team size cannot exceed 4'],
+    validate: {
+      validator: Number.isInteger,
+      message: 'Team size must be an integer'[cite: 2]
+    }
+  },
+  ticketPrice: {
+    type: Number,
+    required: [true, 'Ticket price is required'],
+    min: [0, 'Ticket price cannot be negative'][cite: 2]
+  },
+  discountCode: {
+    type: String,
+    uppercase: true,
+    trim: true[cite: 2]
+  },
+  finalAmount: {
+    type: Number[cite: 2]
+  },
+  status: {
+    type: String,
+    enum: ['PENDING', 'CONFIRMED', 'CANCELLED'],
+    default: 'PENDING'[cite: 2]
+  },
+  registrationDate: {
+    type: Date,
+    default: Date.now,
+    validate: {
+      validator: function(value) {
+        return value <= new Date();
+      },
+      message: 'Registration date cannot be a future date'[cite: 2]
+    }
+  }
+});
+
+// ==========================================
+// 2. BUSINESS LOGIC MIDDLEWARE (DISCOUNT & TEAM SIZE)
+// ==========================================
+registrationSchema.pre('validate', function(next) {
+  // Challenge B: Event-Specific Team Constraint (AI Workshop must have teamSize === 1)[cite: 3]
+  if ((this.eventType === 'AI WORKSHOP' || this.eventType === 'AI_WORKSHOP') && this.teamSize > 1) {
+    return next(new Error('AI Workshop only permits individual registrations'));[cite: 3]
+  }
+
+  // Challenge A: Custom Discount Code Logic[cite: 3]
+  let computedAmount = this.ticketPrice;
+
+  if (this.discountCode) {
+    if (this.discountCode === 'CAMPUS50') {
+      computedAmount = this.ticketPrice * 0.5;[cite: 3]
+    } else if (this.discountCode === 'EARLYBIRD') {
+      computedAmount = Math.max(0, this.ticketPrice - 100);[cite: 3]
+    } else {
+      return next(new Error('Invalid discount code'));[cite: 3]
+    }
+  }
+  
+  this.finalAmount = computedAmount;
+  next();
+});
+
+const Registration = mongoose.model('Registration', registrationSchema);
+
+// ==========================================
+// 3. ERROR HANDLER UTILITY
+// ==========================================
+const handleErrors = (err, res) => {
+  // Duplicate Email Error (MongoDB Code 11000)[cite: 3, 5]
+  if (err.code === 11000) {
+    return res.status(409).json({
+      success: false,
+      message: 'This email is already registered for the event'[cite: 3]
+    });
+  }
+
+  // Mongoose Validation or Custom Pre-save Errors[cite: 5]
+  if (err.name === 'ValidationError' || err.message.includes('Invalid discount code') || err.message.includes('AI Workshop only permits')) {
+    let errors = err.errors ? Object.values(err.errors).map(val => val.message) : [err.message];
+    return res.status(400).json({
+      success: false,
+      errors
+    });[cite: 3, 5]
+  }
+
+  // Invalid MongoDB ObjectId (CastError)[cite: 3, 5]
+  if (err.name === 'CastError') {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid registration ID format'[cite: 3]
+    });
+  }
+
+  return res.status(500).json({
+    success: false,
+    message: 'Internal Server Error',
+    error: err.message
+  });
+};
+
+// ==========================================
+// 4. CONTROLLERS & ENDPOINTS
+// ==========================================
+
+// POST /api/registrations - Create a new registration[cite: 3]
+app.post('/api/registrations', async (req, res) => {
+  try {
+    const newReg = new Registration(req.body);
+    const savedReg = await newReg.save();
+    res.status(201).json({
+      success: true,
+      message: 'Registration successful',
+      data: savedReg
+    });[cite: 3, 4]
+  } catch (err) {
+    handleErrors(err, res);
+  }
+});
+
+// GET /api/registrations - Get all with optional filtering (?eventType=&status=)[cite: 3]
+app.get('/api/registrations', async (req, res) => {
+  try {
+    const filter = {};
+    if (req.query.eventType) filter.eventType = req.query.eventType;
+    if (req.query.status) filter.status = req.query.status;
+
+    const registrations = await Registration.find(filter);
+    res.status(200).json({ success: true, count: registrations.length, data: registrations });[cite: 3]
+  } catch (err) {
+    handleErrors(err, res);
+  }
+});
+
+// GET /api/registrations/:id - Get single registration by ID[cite: 3]
+app.get('/api/registrations/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid registration ID format' });[cite: 3]
+    }
+
+    const registration = await Registration.findById(id);
+    if (!registration) {
+      return res.status(404).json({ success: false, message: 'Registration not found' });[cite: 3]
+    }
+
+    res.status(200).json({ success: true, data: registration });[cite: 3]
+  } catch (err) {
+    handleErrors(err, res);
+  }
+});
+
+// PUT /api/registrations/:id - Update registration (runValidators: true enabled)[cite: 3]
+app.put('/api/registrations/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid registration ID format' });[cite: 3]
+    }
+
+    const updatedReg = await Registration.findByIdAndUpdate(
+      id,
+      req.body,
+      { new: true, runValidators: true, context: 'query' }[cite: 3]
+    );
+
+    if (!updatedReg) {
+      return res.status(404).json({ success: false, message: 'Registration not found' });[cite: 3]
+    }
+
+    res.status(200).json({ success: true, message: 'Updated successfully', data: updatedReg });[cite: 3]
+  } catch (err) {
+    handleErrors(err, res);
+  }
+});
+
+// DELETE /api/registrations/:id - Cancel/Delete registration[cite: 3]
+app.delete('/api/registrations/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid registration ID format' });[cite: 3]
+    }
+
+    const deletedReg = await Registration.findByIdAndDelete(id);
+    if (!deletedReg) {
+      return res.status(404).json({ success: false, message: 'Registration not found' });[cite: 3]
+    }
+
+    res.status(200).json({ success: true, message: 'Cancelled/Deleted successfully' });[cite: 3]
+  } catch (err) {
+    handleErrors(err, res);
+  }
+});
+
+// ==========================================
+// 5. DATABASE CONNECTION & SERVER START
+// ==========================================
+const PORT = process.env.PORT || 5000;
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/campus-event';
+
+mongoose.connect(MONGO_URI)
+  .then(() => {
+    console.log('Connected to MongoDB successfully');
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  })
+  .catch(err => {
+    console.error('Database connection failed:', err);
+  });
